@@ -1,0 +1,611 @@
+---
+title: "BCB420 A2"
+name: Ishmal Amir
+assignment: 2 
+bibliography: references_a2.bib
+link-citations: true
+output:
+  html_document:
+    toc: true
+    toc depth: 2
+    theme: united
+---
+# BCB420 Assignment 2
+
+## Introduction of the Data and Installing Packages
+Before beginning Assignment 2, I needed to load all my code and data from Assignment 1. And before doing this, I loaded all the necessary libraries, as listed below (citations in order of how libraries are listed):
+
+[@unknown-author-no-dateE; @unknown-author-no-dateB; @unknown-author-no-dateA; @unknown-author-no-dateF; @unknown-author-0; @unknown-author-no-dateG; @ggrepel]
+
+```{r}
+#install required libraries
+BiocManager::install("GEOquery") 
+install.packages("ggplot2")
+BiocManager::install("edgeR")
+BiocManager::install("limma")
+BiocManager::install("DESeq2")
+install.packages("pheatmap")
+install.packages("ggrepel")
+```
+
+After this, I loaded my GEO dataset by using the GEOquery library and the geoGEO function [@isserlin-2024A]. Below is a summary of the paper to illustarte the study [@-2023]. 
+
+```{r}
+#load GEOquery library 
+library(GEOquery)
+
+#define the geoid by setting it to the GEO accession number, and retrive the data from the GEO site
+
+geoid <- "GSE252276"
+gdata <- getGEO(geoid, GSEMatrix = FALSE)
+
+#load summary of paper
+gdata@header$summary
+```
+
+## Loading and Filtering Data
+I began this step in A1 by using the getGEOSuppFiles() code as found in lecture [@isserlin-2024A]. I collected the supplementary files because that is where the data was for my paper; I was able to find the relevant file, and luckily in my case there was only 1 data file to choose from. 
+
+```{r}
+#load GEOquery
+library(GEOquery)
+
+#obtain supplmentary files from GEO (specifically the one .tar file, in this case)
+gsupp <- getGEOSuppFiles(geoid, fetch_files = FALSE)
+gfilename <- gsupp$fname[2]
+
+#set download directory 
+download_dir <- "~/"
+
+gfile = getGEOSuppFiles(geoid, baseDir = download_dir, fetch_files = TRUE)
+```
+
+For this chunk and the next few chunks, I worked on filtering my data. First, I needed to filter it by separating the numeric and non-numeric columns [@bhalla-no-dateA]. I was very lucky with my data where the HGNC codes were already mapped to each gene, however that did mean I subsequently had two columns of non-numeric data which none of my codes were happy with at all. I kept running into errors until I did the following.
+
+```{r}
+#read file and get basic information using dim()
+geodata <- read.table(file.path(download_dir, geoid, gfilename), header=TRUE, check.names=TRUE, fill = TRUE)
+head(geodata)
+
+#get the numeric values only (removing the HGNC symbols and gene names) to further work with and analyze data 
+geodata_numeric <- geodata[, sapply(geodata, is.numeric)]
+```
+
+After extracting the non-numeric data, I noticed I had many rows where all values were 0. Meaning there were some genes were in the control they were 0, and also under any treatment. I used the following code to remove them, and then applied the same code to remove very, very low values [@bhalla-no-dateB]. This is where I removed any rows where ALL values were less than 5 in each row. However, if even one column had a value above 5, I kept that row. 
+
+```{r}
+#filter data from very values with '0' in all columns
+row_sums <- rowSums(geodata[, -c(1, 2)])
+geodata_filtered <- geodata[row_sums != 0, ]
+head(geodata_filtered)
+```
+
+```{r}
+#filter data where ALL columns have every value less than or equal to 5
+row_min <- apply(geodata[, -c(1, 2)], 1, min, na.rm = TRUE)
+geodata_filtered_1 <- geodata[row_min >= 5, ]
+head(geodata_filtered_1)
+```
+
+After filtering that way, I needed to do futher filtering by removing any rows where there was 'NA' [@bhalla-no-dateB]. I removed these rows to finally be left with my final filtered dataset ready to go through normalization. 
+
+```{r}
+
+#filter out NA data (data where columns have NA)
+geodata_numeric_no_na <- na.omit(geodata_numeric)
+
+#conduct filtering again for both 0 and <5 (same as above, however re-doing)
+row_sums1 <- rowSums(geodata_numeric_no_na[, -c(1, 2)])
+geodata_numeric_no_na_0 <- geodata_numeric_no_na[row_sums != 0, ]
+
+row_min1 <- apply(geodata_numeric_no_na[, -c(1, 2)], 1, min, na.rm = TRUE)
+geodata_numeric_no_na_1 <- geodata_numeric_no_na[row_min >= 5, ]
+
+#combine the two filtered data frames in one
+g_n_nona_comb <- rbind(geodata_numeric_no_na_0, geodata_numeric_no_na_1)
+
+#omit again any NA values
+filtered_g_n_nona_comb <- na.omit(g_n_nona_comb)
+
+#left with final, filtered dataset pre-normalization
+head(filtered_g_n_nona_comb)
+```
+
+## Normalization
+In this part, I needed to add back in the geneIDs (or gene names, however I was only able to choose one column thus chose one more easily identifiable). This was because when going through normalization, I needed the genes as labels. I added them back in as row names, instead of a column on their own. 
+
+```{r}
+#get the geneIDs from original filtered and combine, then omit any NA values 
+geodata_names <- rbind(geodata_filtered, geodata_filtered_1)
+omit_geodata_names <- na.omit(geodata_names)
+
+#extract row names and set them to the filtered dataset 
+gene_names <- omit_geodata_names$geneID
+dif_row_names <- make.unique(gene_names, sep = "_")
+rownames(filtered_g_n_nona_comb) <- dif_row_names
+
+#obtain final dataset with row names/geneIDs
+head(filtered_g_n_nona_comb)
+```
+
+Here is where I conducted normalization using edgeR, with guidance from the lectures in this course [@isserlin-2024C; @isserlin-2024D]. 
+
+```{r}
+#load edgeR library
+library(edgeR)
+
+#define column names from the filtered dataset (as the column names are the condition names)
+colnames <- colnames(filtered_g_n_nona_comb)
+
+#change to matrix to use with edgeR
+matrixg <- as.matrix(filtered_g_n_nona_comb)
+
+#calculate normalization
+d = DGEList(counts = matrixg, group = colnames)
+d = calcNormFactors(d)
+
+norm_edgeR <- cpm(d)
+```
+
+I plotted my MDS using limma, to show what normalization did for my data [@isserlin-2024A; @isserlin-2024C; @isserlin-2024E]. 
+
+```{r}
+#load limma
+library(limma)
+
+#plot MDS plot 
+limma::plotMDS(d, labels = NULL, pch = 1, col = c("darkgreen", "blue", "orange", "darkblue", "pink", "red", "purple", "grey", "black", "brown", "green", "lightblue") [factor(colnames)])
+
+#define legend and other plot dimensions
+legend("bottomright", legend=levels(factor(colnames)), pch=c(1), col= c("darkgreen", "blue", "orange", "darkblue", "pink", "red", "purple", "grey", "black", "brown", "green", "lightblue"), title="Class", bty = 'n', cex = 0.5)
+```
+
+Before moving onto Assignment 2, I also constructed boxplots using ggplot2. These boxplots are shown to represent the difference between the original dataset, the filtered dataset, and then finally the normalized dataset [@isserlin-2024A; @unknown-author-no-dateB].
+
+```{r}
+#load ggplot2
+library(ggplot2)
+
+#define numeric data again
+geodata_numeric <- geodata[, sapply(geodata, is.numeric)]
+gplot_numeric <- log2(geodata_numeric)
+gplot <- cbind(geodata[, !sapply(geodata, is.numeric)], gplot_numeric)
+
+#plot original data BEFORE filtering
+plot.new()
+boxplot(geodata_numeric, xlab = "Samples", ylab = "Values", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "RNASeqSamples")
+abline(h = median(apply(gplot_numeric, 2, median)), col = "green", lwd = 0.6, lty = "dashed")  
+
+#plot filtered data BEFORE normalization
+plot.new()
+boxplot(filtered_g_n_nona_comb, xlab = "Samples", ylab = "Values", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "Filtered RNASeqSamples")
+abline(h = median(apply(gplot_numeric, 2, median)), col = "green", lwd = 0.6, lty = "dashed")  
+
+#plot normalized data using edgeR object
+norm_edgeR_df <- as.data.frame(norm_edgeR)
+plot.new()
+boxplot(norm_edgeR_df, xlab = "Samples", ylab = "Values", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "Normalized RNA Samples")
+abline(h = median(apply(gplot_numeric, 2, median)), col = "green", lwd = 0.6, lty = "dashed") 
+```
+
+## Assignment 2: Differential Gene Expression and MA + Volcano Plot
+To begin this part of the assignment, I needed to define my column data as my code was not working unless I included this part. I was able to use the DESeq2 package and the R errors to help me figure out what was going on [@love-2024].
+
+```{r}
+#define column names to use in DESeq2 as it was not running code without this 
+sample_names <- colnames(filtered_g_n_nona_comb)
+
+#use colData to define the column names of data frame
+colData <- data.frame(sampleName = sample_names)
+rownames(colData) <- sample_names
+```
+
+After this, I loaded the DESeq2 library and ran DESeq2 [@love-2024]. I used DESeq2 for the majority of this assignment because DESeq2 is able to both normalize and differentiate findings. This is especially useful as it provided for me the base mean, log2FoldChange, as well as standard p-values and the adjusted p-values, of which the latter are vital to the rest of the calculations. I also chose DESeq2, compared to continuing with edgeR, because my data includes many repetitions of the same condition. I defined these repetitions as my model design, as seen below, so that my data is accurately represented [@unknown-author-no-dateD; @unknown-author-no-dateC]. I printed the results both as a DESeq2 object, and as a data frame to display the findings. I also included a summary of my results, to allow for easier comprehension. 
+
+```{r}
+#load DESeq2
+library(DESeq2)
+
+#set conditions/design model 
+conditions <- factor(rep(1:4, each = 3))
+col_data <- data.frame(condition = conditions)
+col_data$condition <- factor(col_data$condition)
+
+#conduct DESeq2 analysis by first defining DESeq2 object then runnnig DESeq2 
+gdds <- DESeqDataSetFromMatrix(countData = filtered_g_n_nona_comb, colData = col_data, design = ~ condition)
+
+gdds <- DESeq(gdds)
+
+results <- results(gdds)
+
+#summary of results
+summary(results)
+
+#condition names from DESeq2
+resultsNames(gdds)
+
+#results into data frame
+results_df <- as.data.frame(results)
+
+head(results_df)
+
+```
+
+After I got my results, I filtered them further to get the significant genes, by setting thresholds for my adjusted p-values and my log2FoldChange [@love-2024]. I set thresholds for these as DESeq2 uses the Benjamini-Hochberg (BH) method to correct p-values and control the false discovery rate (FDR). [@pipis-2023]. 
+
+```{r}
+#using the native DESeq2 subset function, define parameters to obtain significant genes
+resSig <- subset(results, padj < 0.05 & log2FoldChange > 0.6)
+
+head(resSig)
+```
+
+In this part, I used the base density code from lecture to create a density graph for my DESeq2 data [@isserlin-2024D; @isserlin-2024C; @isserlin-2024A]. Continuing with Assignment 1, I believe this allows for continuity. 
+
+```{r}
+#define log2fc and the density using it
+logfc <- results_df$log2FoldChange
+density_estimate <- density(logfc)
+
+#plot density 
+plot(density_estimate, type = "n",
+     ylab = "Smoothing density of Log2-CPM",
+     main = "", cex.lab = 0.85)
+
+lines(density_estimate, col = "blue")
+```
+
+I wanted to create an MA plot before doing a volcano plot, thus I adapted the base ggplot2 code from the ggplot2 package to plotMA. This is very easy as I already had base mean and log2FoldChange in my data [@unknown-author-no-dateB].
+
+```{r}
+#load ggplot2
+library(ggplot2)
+
+#plot DESEq2 results
+ggplot(results_df, aes(x = baseMean, y = log2FoldChange)) +
+  geom_point() +
+  labs(x = "Mean of normalized counts (baseMean)", y = "log2 Fold Change") +
+  ggtitle("MA-plot of Differential Expression")
+```
+
+After this I calculated the dispersion--this was also simple as I was able to input my DESeq2 object into the DESeq2 code [@love-2024].
+
+```{r}
+#using DESeq2 native dispersion function, calculate and define dispersion
+dispersionFunction(gdds)
+plotDispEsts(gdds)
+```
+
+Finally, I created my volcano plot by first defining my up and down regulated genes [@bonnin-2020]. Once I did this, I created colour schemes and set the dimensions of my plot. Although my plot is not as clear as I believe, it still encapsulates my data. I believe this is partly due to the large amount of rows/genes in my data. 
+
+```{r}
+#load ggplot2
+library(ggplot2)
+
+#define down and up regulated genes and gene that had no effect
+results_df$diffexpressed <- "NO"
+results_df$diffexpressed[results_df$log2FoldChange > 0.6 & results_df$padj < 0.05] <- "UP"
+results_df$diffexpressed[results_df$log2FoldChange < -0.6 & results_df$padj < 0.05] <- "DOWN"
+
+#start plot
+v <- ggplot(data=results_df, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed)) + geom_point() + theme_minimal()
+
+#add in more definitions for intercepts and colours
+v2 <- v + geom_vline(xintercept=c(-0.6, 0.6), col="lightgreen") +
+        geom_hline(yintercept=-log10(0.05), col="lightgreen")
+
+mycolors <- c("red", "blue", "lightgreen")
+names(mycolors) <- c("UP", "DOWN", "NO")
+v3 <- v2 + scale_colour_manual(values = mycolors)
+
+#load ggrepel
+library(ggrepel)
+
+#define delabel 
+results_df$delabel <- NA
+results_df$delabel[results_df$diffexpressed != "NO"] <- rownames(filtered_g_n_nona_comb)[results_df$diffexpressed != "NO"]
+
+#plot final volcano plot
+v_final <- ggplot(data=results_df, aes(x=log2FoldChange, y=-log10(padj), col=diffexpressed, label=delabel)) +
+        geom_point() + 
+        theme_minimal() +
+        geom_text_repel() +
+        scale_color_manual(values=c("red", "blue", "lightgreen")) + 
+        geom_vline(xintercept=c(-0.6, 0.6), col="black") +
+        geom_hline(yintercept=-log10(0.05), col="black") +
+   labs(x = "log2FoldChange", y = "Adjusted P-Values") +
+  ggtitle("Volcano Plot")
+
+#print plot
+print(v_final)
+
+```
+
+### Question Answers Part 1
+**1. Calculate p-values for each of the genes in your expression set. How many genes were significantly differentially expressed? What thresholds did you use and why?**
+
+A: There were many genes that were differential expressed; by setting thresholds of p < 0.05, and l2fc > 0.6, I was able to get 416 genes that were significantly expressed. I used these thresholds because due to the large amount of genes, I was able to control for a very low p-value. By setting the log2FoldChange threshold, I was able to receive the significantly differentially expressed genes, as l2fc calcualtes this [@unknown-author-no-dateK].
+
+**2. Multiple hypothesis testing - correct your p-values using a multiple hypothesis correction method. Which method did you use? And Why? How many genes passed correction?**
+
+A: As apart of DESeq2, p-values are already corrected (and can be found under the adjusted p-values (padj)). The method DESeq2 uses to correct the p-values is the Benjamini-Hochberg (BH) which corrects using the false discovery rate (FDR). [@unknown-author-0; @pipis-2023]
+
+## Heatmap
+I then coded for a heatmap to further represent my data, using my DESeq2 object. [@unknown-author-no-dateG]
+
+```{r}
+#load pheatmap
+library(pheatmap)
+
+#define 'select' data from DESeq2 object 
+select <- order(rowMeans(counts(gdds,normalized=TRUE)),
+                decreasing=TRUE)[1:20]
+#define column data
+col_d <- colData(gdds)
+
+#create data frame for annotation
+df <- data.frame(condition = col_d$condition, sizeFactor = col_d$sizeFactor)
+
+#create heatmap
+heatmap <- pheatmap(assay(gdds)[select,], cluster_rows=FALSE, show_rownames=FALSE, cluster_cols=FALSE, annotation_col=df,
+         main = "Heatmap",
+         xlabel = "Treatments")
+```
+
+### Question Answers Part 2
+**3. Visualize your top hits using a heatmap. Do your conditions cluster together? Explain why or why not.**
+
+A: Yes, some conditions cluster together especially along the 40,000-60,000 factors. There is true acorss all conditions, with condition CC1 until GFP_2 having relatively similar displays. This may be because the repetitions in the data allow for a more clustered look, as well as overall biological similarity of the conditions to each other (as they are apart of the same genome). 
+
+## Up and Down Regulated Genes and ORA
+I first re-stated my down and up regulated genes. I luckily had these coded before for the volcano plot, so it was simple to copy over and define variable for. 
+
+```{r}
+#define down and up regulated genes
+results$diffexpressed <- "NO"
+results$diffexpressed[results$log2FoldChange > 0.6 & results$padj < 0.05] <- "UP"
+down <- results$diffexpressed[results$log2FoldChange < -0.6 & results$padj < 0.05] <- "DOWN"
+
+up_genes <- results$diffexpressed[results$diffexpressed == "UP"]
+down_genes <- results$diffexpressed[results$log2FoldChange < -0.6 & results$padj < 0.05] <- "DOWN"
+
+#print length of up and down regulated genes
+length(results$diffexpressed[results$diffexpressed == "UP"])
+length(results$diffexpressed[results$diffexpressed == "DOWN"])
+```
+
+Then, I loaded the required packages for the GSEA analysis (using fgsea) [@unknown-author-no-dateL]. I was unable to get this code to work properly, or at all, so I listed what I know to do. I also included the option to use the Bioconductor built-in annotation data, but I would not use it as I couldn't find the date it is from [@unknown-author-no-dateN; @unknown-author-no-dateO]. Instead, I would use annotation data from the Gene Ontology site under 'Homo sapien' from January 17, 2024 [@unknown-author-no-dateM].
+
+```{r}
+
+#load fgsea library 
+library(fgsea)
+
+#load these libraries if want to use bioconductor's gene annotations
+# library(org.Hs.eg.db)
+# library(GO.db)
+
+#base code for conducting fgsea
+#gsea_data <- fgsea(pathways = #Gene Ontology
+                 # stats    = #dataset such as gdds,
+                 # minSize  = 15,
+                 # maxSize  = 500)
+
+#After this, I would use G:Profiler via R to conduct the threshold over-representation analysis. [@comprehensive-r-archive-network-cran-no-date]
+```
+
+### Question Answers Part 3
+**4. With your significantly up-regulated and down-regulated set of genes run a thresholded gene set enrichment analysis. Which method did you choose and why?**
+
+A: To conduct the gene-set enrichment analysis I used (or, would use) GSEA (specifically fgsea) and then G:Profiler for the threshold over representation analysis. 
+
+**5. What annotation data did you use and why? What version of the annotation are you using?**
+
+A: I used annotation data from Gene Ontology, via this source [@unknown-author-no-dateM]. I am using the latest version of the annotation, from January 17, 2024. There is also the option to use the "org.Hs.eg.db" and "GO.db" packages from bioconductor, however I could not find how recent/relevant they were [@unknown-author-no-dateN; @unknown-author-no-dateO]. 
+
+**6. How many genesets were returned with what thresholds?**
+
+**7. Run the analysis using the up-regulated set of genes, and the down-regulated set of genes separately. How do these results compare to using the whole list (i.e all differentially expressed genes together vs. the up-regulated and down regulated differentially expressed genes separately)?**
+
+A: I assume that the analysis, compared to the whole list together, would be different as there are about double the amount of down-regulated genes compared to up-regulated genes. 
+
+## Interpretation
+**1. Do the over-representation results support conclusions or mechanism discussed in the original paper?**
+
+A: The paper showed that AIPL1co and AIPL1wt conditions showed very different results, with AIPL1co showing less of an antiviral response compared to AIPL1wt, thus both conditions displaying different differentiated genes [@-2023]. The ORA results in this assignment don't really support this conclusion as it was difficult to isolate and conduct an analysis for each condition with each other. Although DESeq2 did conduct analysis with conditions 1 vs. 2, and 1 vs. 3 and so on, it looked different to the publishers. 
+
+**2. Can you find evidence, i.e. publications, to support some of the results that you see. How does this evidence support your results.**
+
+A: In terms of evidence for my results, I believe they are in-line still with the original publication as both AIPL conditions had the highest amount of expression when looking at the heatmap. Because my data was plotted all together compared to each different condition, it showed the up and down regulated genes overall in my dataset. 
+
+## References
+@misc{unknown-author-0,
+	title = {{DESEQ2}},
+	url = {https://bioconductor.org/packages/release/bioc/html/DESeq2.html},
+}
+@misc{ctb-2021,
+	author = {Ctb, Michael Love [aut Cre], Constantin Ahlmann-Eltze [ctb], Kwame Forbes [ctb], Simon Anders [aut, Ctb], Wolfgang Huber [aut,},
+	month = {2},
+	title = {{MA-plot from base means and log fold changes}},
+	year = {2021},
+	url = {https://rdrr.io/bioc/DESeq2/man/plotMA.html},
+}
+@article{maza-2016,
+	author = {Maza, Élie},
+	journal = {Frontiers in Genetics},
+	month = {9},
+	title = {{In Papyro comparison of TMM (EDGER), RLE (DESEQ2), and MRN normalization methods for a simple Two-Conditions-Without-Replicates RNA-SEQ experimental design}},
+	volume = {7},
+	year = {2016},
+	doi = {10.3389/fgene.2016.00164},
+	url = {https://doi.org/10.3389/fgene.2016.00164},
+}
+@misc{blog-2016,
+	author = {Blog, Rna-Seq and Blog, Rna-Seq},
+	month = {10},
+	title = {{Comparison of TMM (EDGER), RLE (DESEQ2), and MRN normalization methods | RNA-Seq blog}},
+	year = {2016},
+	url = {https://www.rna-seqblog.com/comparison-of-tmm-edger-rle-deseq2-and-mrn-normalization-methods/},
+}
+@misc{unknown-author-no-dateA,
+	title = {{EdgeR}},
+	url = {https://bioconductor.org/packages/edgeR/},
+}
+@article{abbasaghababazadeh-2018,
+	author = {Abbas‐Aghababazadeh, Farnoosh and Li, Qian and Fridley, Brooke L.},
+	journal = {PLOS ONE},
+	month = {10},
+	number = {10},
+	pages = {e0206312},
+	title = {{Comparison of normalization approaches for gene expression studies completed with high-throughput sequencing}},
+	volume = {13},
+	year = {2018},
+	doi = {10.1371/journal.pone.0206312},
+	url = {https://doi.org/10.1371/journal.pone.0206312},
+}
+@misc{love-2024,
+	author = {Love, Michael I. and Anders, Simon and Huber, Wolfgang},
+	title = {{Analyzing RNA-seq data with DESeq2}},
+	year = {2024},
+	url = {https://www.bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html},
+}
+@misc{unknown-author-no-dateB,
+	annotate = {ggplot basic},
+	title = {{Create elegant data visualisations using the grammar of graphics}},
+	url = {https://ggplot2.tidyverse.org/},
+}
+@misc{bonnin-2020,
+	author = {Bonnin, Sarah},
+	month = {3},
+	title = {{19.11 Volcano plots | Introduction to R}},
+	year = {2020},
+	url = {https://biocorecrg.github.io/CRG_RIntroduction/volcano-plots.html},
+}
+@misc{unknown-author-no-dateC,
+	title = {{Design model for DESeq2 analysis}},
+	url = {https://support.bioconductor.org/p/102684/},
+}
+@misc{unknown-author-no-dateD,
+	title = {{Error:The design matrix has the same number of samples and coefficients to fit,   so estimation of dispersion is not possible. Treating samples   as replicates was deprecated in v1.20 and no longer su}},
+	url = {https://support.bioconductor.org/p/134505/},
+}
+@misc{comprehensive-r-archive-network-cran-no-date,
+	author = {Comprehensive R Archive Network (CRAN)},
+	title = {{CRAN - Package gprofiler2}},
+	url = {https://cran.r-project.org/web/packages/gprofiler2/index.html},
+}
+@misc{unknown-author-no-dateE,
+	title = {{GEOQuery}},
+	url = {https://www.bioconductor.org/packages/release/bioc/html/GEOquery.html},
+}
+@misc{unknown-author-no-dateF,
+	title = {{limma}},
+	url = {https://bioconductor.org/packages/release/bioc/html/limma.html},
+}
+@misc{unknown-author-no-dateG,
+	title = {{pheatmap function - RDocumentation}},
+	url = {https://www.rdocumentation.org/packages/pheatmap/versions/1.0.12/topics/pheatmap},
+}
+@misc{unknown-author-no-dateH,
+	title = {{Visual R Markdown - citations}},
+	url = {https://rstudio.github.io/visual-markdown-editing/citations.html#:~:text=You%20insert%20citations%20by%20either,and%20are%20separated%20by%20semicolons.},
+}
+@misc{unknown-author-no-dateI,
+	title = {{R Markdown Syntax: Headings & Lists – Authoring scientific publications with R Markdown}},
+	url = {https://ucsbcarpentry.github.io/R-markdown/03-headings-lists/index.html},
+}
+@misc{unknown-author-no-dateJ,
+	title = {{How to add table of contents in Rmarkdown?}},
+	url = {https://stackoverflow.com/questions/23957278/how-to-add-table-of-contents-in-rmarkdown},
+}
+@misc{bhalla-no-dateA,
+	author = {Bhalla, Deepanshu},
+	title = {{How to Extract Numeric Variables from Dataframe in R}},
+	url = {https://www.listendata.com/2023/08/extract-numeric-columns-in-r.html},
+}
+@misc{bhalla-no-dateB,
+	author = {Bhalla, Deepanshu},
+	title = {{7 Ways to Remove Rows with NA in R}},
+	url = {https://www.listendata.com/2023/07/7-ways-to-remove-rows-with-na-in-r.html},
+}
+@misc{pipis-2023,
+	author = {Pipis, George and Pipis, George},
+	month = {7},
+	title = {{The Benjamini-Hochberg procedure (FDR) and P-Value Adjusted Explained | R-bloggers}},
+	year = {2023},
+	url = {https://www.r-bloggers.com/2023/07/the-benjamini-hochberg-procedure-fdr-and-p-value-adjusted-explained/},
+}
+@misc{unknown-author-no-dateK,
+	title = {{FPKM Files}},
+	url = {https://support.illumina.com/help/BS_App_RNASeq_DE_OLH_1000000071939/Content/Source/Informatics/Apps/DESeq2ResultFile_swBS.htm#:~:text=log2FoldChange%E2%80%93The%20effect%20size%20estimate,the%20log2%20fold%20change%20estimate.},
+}
+@misc{unknown-author-no-dateL,
+	title = {{Using fgsea package}},
+	url = {https://bioconductor.org/packages/devel/bioc/vignettes/fgsea/inst/doc/fgsea-tutorial.html},
+}
+@misc{unknown-author-no-dateM,
+	title = {{Download annotations | Gene Ontology Consortium}},
+	url = {https://current.geneontology.org/products/pages/downloads.html},
+}
+@misc{unknown-author-no-dateN,
+	title = {{Org.Hs.eg.db}},
+	url = {https://bioconductor.org/packages/3.14/data/annotation/html/org.Hs.eg.db.html},
+}
+@misc{unknown-author-no-dateO,
+	title = {{DO.Db}},
+	url = {https://bioconductor.org/packages/3.14/data/annotation/html/DO.db.html},
+}
+@article{-2023,
+	author = {Галиева, А. Т. and Egorov, Alexander and Malogolovkin, Alexander and Brovin, Andrew and Karabelsky, Alexander},
+	journal = {International Journal of Molecular Sciences},
+	month = {12},
+	number = {1},
+	pages = {197},
+	title = {{RNA-Seq analysis of Trans-Differentiated ARPE-19 cells transduced by AAV9-AIPL1 vectors}},
+	volume = {25},
+	year = {2023},
+	doi = {10.3390/ijms25010197},
+	url = {https://doi.org/10.3390/ijms25010197},
+}
+@misc{isserlin-2024A,
+	author = {Isserlin, Ruth},
+	title = {{lecture4_get_the_data.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30146641?module_item_id=5505849},
+}
+@misc{isserlin-2024B,
+	author = {Isserlin, Ruth},
+	title = {{lecture8_prelim_ORA.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30766485?module_item_id=5573089},
+}
+@misc{isserlin-2024C,
+	author = {Isserlin, Ruth},
+	title = {{lecture5_normalizing_our_dataset.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30263688?module_item_id=5518469},
+}
+@misc{isserlin-2024D,
+	author = {Isserlin, Ruth},
+	title = {{lecture5_normalization.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30249274?module_item_id=5517248},
+}
+@misc{isserlin-2024E,
+	author = {Isserlin, Ruth},
+	title = {{lecture7_differential_expression_with_edger.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30640370?module_item_id=5559011},
+}
+@misc{isserlin-2006,
+	author = {Isserlin, Ruth},
+	title = {{lecture7_heatmaps.pdf}},
+	year = {2006},
+	url = {https://q.utoronto.ca/courses/336715/files/30647084?module_item_id=5560122},
+}
+@misc{ggrepel,
+  author = NA
+  title = ggrepel
+  year = 2024
+  url = https://cran.r-project.org/web/packages/ggrepel/readme/README.html
+  }
