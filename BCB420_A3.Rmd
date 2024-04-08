@@ -1,0 +1,693 @@
+---
+title: "BCB420 A3"
+name: Ishmal Amir
+assignment: 3
+output:
+  html_document:
+    toc: yes
+    toc depth: 2
+    theme: united
+  pdf_document:
+    toc: yes
+link-citations: yes
+bibliography: references_a3.bib
+---
+# BCB420 Assignment 3
+
+## Introduction of the Data and Installing Packages
+Similar to before I began Assignment 2, I loaded the necessary code needed to begin Assignment 3. Below are the necessary libraries needed: 
+
+[@geoquery-no-date; @edger-no-date; @limma-no-date; @deseq2-no-date; @ggrepel-no-date; @clusterprofiler-no-date; @annotationdbi-no-date; @orghsegdb-no-date] 
+
+```{r}
+#install required libraries
+BiocManager::install("GEOquery") 
+BiocManager::install("edgeR")
+BiocManager::install("limma")
+BiocManager::install("DESeq2")
+install.packages("ggrepel")
+BiocManager::install("clusterProfiler")
+BiocManager::install("AnnotationDbi")
+BiocManager::install("org.Hs.eg.db") 
+```
+
+First, I loaded my GEO dataset by using the GEOquery library and the geoGEO function [@isserlin-2024A]. Below is a summary of the paper to illustarte the study [@-2023]. 
+
+```{r}
+#load GEOquery library 
+library(GEOquery)
+
+#define the geoid by setting it to the GEO accession number, and retrive the data from the GEO site
+
+geoid <- "GSE252276"
+gdata <- getGEO(geoid, GSEMatrix = FALSE)
+
+#load summary of paper
+gdata@header$summary
+```
+
+## Loading and Filtering Data
+I did the same steps as in A1 and A2, using the getGEOSuppFiles() code as found in lecture [@isserlin-2024A]. There was only one supplmentary file for my data, which made collection and identification a lot easier. 
+
+```{r}
+#load GEOquery
+library(GEOquery)
+
+#obtain supplmentary files from GEO (specifically the one .tar file, in this case)
+gsupp <- getGEOSuppFiles(geoid, fetch_files = FALSE)
+gfilename <- gsupp$fname[2]
+
+#set download directory 
+download_dir <- "~/"
+
+gfile = getGEOSuppFiles(geoid, baseDir = download_dir, fetch_files = TRUE)
+```
+
+Below and the next few chunks are how I filtered my data in A1 and A2, to provide context with what kind of data I used for A3. First, I needed to filter it by separating the numeric and non-numeric columns [@bhalla-no-dateA]. My data already came with HGNC codes mapped to each gene, however that did mean I subsequently had two columns of non-numeric data, which none of my codes recognized. I kept running into errors until I removed them and remapped geneIDs as columns.
+
+```{r}
+#read file and get basic information using dim()
+geodata <- read.table(file.path(download_dir, geoid, gfilename), header=TRUE, check.names=TRUE, fill = TRUE)
+head(geodata)
+
+#get the numeric values only (removing the HGNC symbols and gene names) to further work with and analyze data 
+geodata_numeric <- geodata[, sapply(geodata, is.numeric)]
+```
+
+After extracting the non-numeric data, I removed rows where all values were 0. Meaning there were some genes were in the control they were 0, and also under any treatment. I used the following code to remove them, and then applied the same code to remove very, very low values [@bhalla-no-dateB]. This is where I removed any rows where ALL values were less than 5 in each row. However, if even one column had a value above 5, I kept that row. 
+
+```{r}
+#filter data from very values with '0' in all columns
+row_sums <- rowSums(geodata[, -c(1, 2)])
+geodata_filtered <- geodata[row_sums != 0, ]
+head(geodata_filtered)
+```
+
+```{r}
+#filter data where ALL columns have every value less than or equal to 5
+row_min <- apply(geodata[, -c(1, 2)], 1, min, na.rm = TRUE)
+geodata_filtered_1 <- geodata[row_min >= 5, ]
+head(geodata_filtered_1)
+```
+
+After filtering that way, I needed to do futher filtering by removing any rows where there was 'NA' [@bhalla-no-dateB]. I removed these rows to finally be left with my final filtered dataset ready to go through normalization. 
+
+```{r}
+
+#filter out NA data (data where columns have NA)
+geodata_numeric_no_na <- na.omit(geodata_numeric)
+
+#conduct filtering again for both 0 and <5 (same as above, however re-doing)
+row_sums1 <- rowSums(geodata_numeric_no_na[, -c(1, 2)])
+geodata_numeric_no_na_0 <- geodata_numeric_no_na[row_sums != 0, ]
+
+row_min1 <- apply(geodata_numeric_no_na[, -c(1, 2)], 1, min, na.rm = TRUE)
+geodata_numeric_no_na_1 <- geodata_numeric_no_na[row_min >= 5, ]
+
+#combine the two filtered data frames in one
+g_n_nona_comb <- rbind(geodata_numeric_no_na_0, geodata_numeric_no_na_1)
+
+#omit again any NA values
+filtered_g_n_nona_comb <- na.omit(g_n_nona_comb)
+
+#left with final, filtered dataset pre-normalization
+dim(filtered_g_n_nona_comb)
+```
+
+## Normalization
+In this part, I needed to add back in the geneIDs (or gene names, however I was only able to choose one column thus chose one more easily identifiable). This was because when going through normalization, I needed the genes as labels. I added them back in as row names, instead of a column on their own. 
+
+```{r}
+#get the geneIDs from original filtered and combine, then omit any NA values 
+geodata_names <- rbind(geodata_filtered, geodata_filtered_1)
+omit_geodata_names <- na.omit(geodata_names)
+
+#extract row names and set them to the filtered dataset 
+gene_names <- omit_geodata_names$geneID
+dif_row_names <- make.unique(gene_names, sep = "_")
+rownames(filtered_g_n_nona_comb) <- dif_row_names
+
+#obtain final dataset with row names/geneIDs
+head(filtered_g_n_nona_comb)
+dim(filtered_g_n_nona_comb)
+```
+
+Here is where I conducted normalization using edgeR, with guidance from the lectures in this course [@isserlin-2024C; @isserlin-2024D]. 
+
+```{r}
+#load edgeR library
+library(edgeR)
+
+#define column names from the filtered dataset (as the column names are the condition names)
+colnames <- colnames(filtered_g_n_nona_comb)
+
+#change to matrix to use with edgeR
+matrixg <- as.matrix(filtered_g_n_nona_comb)
+
+#calculate normalization
+d = DGEList(counts = matrixg, group = colnames)
+d = calcNormFactors(d)
+
+norm_edgeR <- cpm(d)
+
+head(norm_edgeR)
+```
+
+In A2, I constructed boxplots using ggplot2 to represent the difference between the original dataset, the filtered dataset, and then finally the normalized dataset [@isserlin-2024A]. I've included these boxplots below to represent the data before GSEA analysis. I've included these boxplots as images of both the plot and the code (taken from the A2 html file) as I kept encountering an error for some reason with ggplot2 this time.  
+
+![rnaseq](~/projects/a3_extras/rnaseq.png)
+![filtered_rnaseq](~/projects/a3_extras/filtered_rnaseq.png) 
+![normalized_rnaseq](~/projects/a3_extras/normalized_rnaseq.png) 
+
+## Differential Gene Expression
+To differential gene expression, I needed to define my column data as my code was not working unless I included this part. I was able to use the DESeq2 package and the R errors to help me figure out what was going on [@love-2024]. Conducting DESeq2 is the basis of my data from this point onwards, as it is the basis of A2 and A3. 
+
+```{r}
+#define column names to use in DESeq2 as it was not running code without this 
+sample_names <- colnames(filtered_g_n_nona_comb)
+
+#use colData to define the column names of data frame
+colData <- data.frame(sampleName = sample_names)
+rownames(colData) <- sample_names
+```
+
+After this, I loaded the DESeq2 library and ran DESeq2 [@love-2024]. I defined repetitions within  my model design, as seen below, so that my data is accurately represented [@unknown-author-no-dateB; @unknown-author-no-dateA] because my data has 3 repititions per conditon. I printed the results both as a DESeq2 object, and as a data frame to display the findings. I also included a summary of my results, to allow for easier comprehension. 
+
+```{r}
+#load DESeq2
+library(DESeq2)
+
+#set conditions/design model 
+conditions <- factor(rep(1:4, each = 3))
+col_data <- data.frame(condition = conditions)
+col_data$condition <- factor(col_data$condition)
+
+#conduct DESeq2 analysis by first defining DESeq2 object then runnnig DESeq2 
+gdds <- DESeqDataSetFromMatrix(countData = filtered_g_n_nona_comb, colData = col_data, design = ~ condition)
+
+gdds <- DESeq(gdds)
+
+results <- results(gdds)
+
+#summary of results
+summary(results)
+
+#condition names from DESeq2
+resultsNames(gdds)
+
+#results into data frame
+results_df <- as.data.frame(results)
+
+head(results_df)
+```
+
+This is what my volcano plot looks like after specifying up and down regulated genes (full code can be seen in A2).
+
+![volcanoplot](~/projects/a3_extras/volcanoplot.png)
+
+## Assignment 3: Non-Thresholded Gene Set Enrichment Analysis
+
+### Setting Up Data
+I finally started the A3 part of this assignment. For this part, I originally and primarily used GSEA, via the gseGO function via clusterprofiler in R [@clusterprofiler-no-date]. I used the following sources to help me define my ranked gene list, including deciding which statistic to use (I used the "stat" column which represents the t-test statistic), and why not to use certain stats [@biostars1-no-date; @biostars2-no-date; @biostars3-no-date]. Although I did want to use two columns, it was easier when conducting my analysis to use one. This is the citation for removing the numbers after decimals, as I needed to so that I could accurately map my data [@remove-after-decimals-no-date]. I also needed to subsequently remove duplicate rows, as I noticed that in my data there were duplicated of the exact same rows where all values were the same across all columns [@remove-duplicates-no-date].
+
+```{r}
+#define column from results object to use--in this case stats column
+#order column from smallest to largest value
+ranked <- results[order(-results$stat),]
+head(ranked)
+
+#obtain row names as a separate vector 
+row_names <- rownames(results_df)
+
+#remove the numbers after decimals in the row names (done originally to identify) so that mapping can be accurately
+modified_row_names <- sub("\\..*", "", row_names)
+results_df$modified_gene_id <- sub("\\..*", "", rownames(results_df))
+
+#define gene list again after removing the numbers after decimals 
+gene_list <- ranked$stat
+names(gene_list) <- results_df$modified_gene_id
+head(gene_list)
+
+#remove duplicates of rows, and make sure to set values and names of genes back together in the character 
+unique_values <- unique(gene_list)
+unique_names <- names(gene_list)[!duplicated(gene_list)]
+unique_named_numeric <- setNames(unique_values, unique_names)
+head(unique_named_numeric)
+
+```
+### gseGO
+So I originally wanted to use fgsea and I found a tutorial from @turner-2018, however I couldn't figure out how to accurately make it work with my data. Thankfully, I came across a tutorial from  @sanbomics-gsego-tutorial-2022 which used gseGO and results from DESeq2. After doing more research, I did find that gseGO did also incorporate fgsea/GSEA anyhow, which means it all worked out [@clusterprofiler-no-date; @the-difference-in-pathway-analysis-result-2023].
+
+I used the "org.Hs.eg.db" annotation database from Gene Ontology because it is the easiest to access and it is also what is used in the @sanbomics-gsego-tutorial-2022 tutorial. Though it is not as recent as something downloaded directly from the Gene Ontology annotations website, the database is apart of the AnnotationDbi package from Bioconductor and is updated every six months, with the most recent update being in November 3, 2023; it is also installed from it's own package within Bioconductor [@rue-albrecht-no-date; @annotationdbi-no-date; @orghsegdb-no-date].
+
+```{r}
+#load required libraries and then load gseGO function by loading gene list, biological processes (BP) pathway, ensembl mapping and org.Hs.eg.db database. The maximum parameters are used. 
+
+library(clusterProfiler)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+
+gse <- gseGO(unique_named_numeric,
+             ont = "BP",
+             keyType = "ENSEMBL",
+             OrgDb = "org.Hs.eg.db",
+             eps = 1e-300)
+
+```
+
+```{r}
+#create a data frame with resulst
+gse_df <- as.data.frame(gse)
+head(gse_df)
+```
+
+I also created a density plot to represent the data, to display it similar to how I did in A1 and A2. I followed the same process as in lectures [@isserlin-2024D; @isserlin-2024C; @isserlin-2024A]. 
+
+```{r}
+#create density plot with adjusted p-values column
+p_adj <- gse_df$p.adjust
+gseplot_density <- density(p_adj)
+
+#plot density 
+plot(gseplot_density, type = "n",
+     ylab = "Smoothing Density of Adjusted P-Values from GSEA",
+     main = "", cex.lab = 0.85)
+
+lines(gseplot_density, col = "blue")
+```
+
+Using the gseGO native gseaplot native function, plotted data [@sanbomics-gsego-tutorial-2022].
+
+```{r}
+gseaplot(gse, geneSetID = 1)
+```
+
+### Questions Part 1
+**1. What method did you use? What genesets did you use? Make sure to specify versions and cite your methods.**
+
+A: I used gseGO as a part of the clusterProfiler package from Bioconductor [@clusterprofiler-no-date]. gseGO uses fgsea/GSEA to conduct analysis. I used the genesets from org.Hs.eg.db, with the Biological Processes pathway, from November 3, 2023 accesses from within the AnnotationDbi package from Bioconductor, and also as a separate package from Bioconductor [@annotationdbi-no-date; @orghsegdb-no-date]. This was accesses from the gseGO function [@sanbomics-gsego-tutorial-2022]. 
+
+**2. Summarize your enrichment results.**
+
+A: My results show that there are significantly enriched genes in both the up and down regulated genes, as can be seen by the back vertical lines in the top plot. There are minimal enriched genes that stayed the same. The green lines shows that there are many enriched genes close together in the up regulated genes, and it tapers off with some in the down regulated as well but not as many.
+
+**3. How do these results compare to the results from the thresholded analysis in Assignment #2. Compare qualitatively. Is this a straight forward comparison? Why or why not?**
+
+A: These compare to my A2 results as it aligns with the findings that there are both down and up regulated genes, however there are significantly more up regulated genes. 
+
+## Cytoscape
+Now I needed to conduct Cytoscape. For this part, although I wanted to use my GSEA results, I wasn't able to as I did not have the necessary files and couldn't figure out how to export them. I also couldn't figure out how to use RCy3, the R package to connect to Cytoscape. Instead, I decided to use the G:Profiler web app and the Cytoscape desktop app to conduct my analysis, and used a tutorial I found that Professor Isserlin actually helped compile [@cytoscape-ono-no-date; @gprofiler-generator-no-date; @tour-of-cytoscape-no-date].
+
+I began by using my DESeq2 results to define my significant genes and also did the same decimal removing as earlier, and then generating my gene list to input into G:Profiler [@love-2024; @remove-after-decimals-no-date; @zach-2022].
+
+```{r}
+#define significant genes
+resSig <- subset(results, padj < 0.05 & log2FoldChange > 0.6)
+resSig_df <- as.data.frame(resSig)
+head(resSig_df)
+
+#add geneIDs and generate list
+gene_symbols <- rownames(resSig_df)
+gene_sym <- as.list(gene_symbols)
+head(gene_sym)
+
+#remove numbers after decimal
+gene_symbols_cleaned <- gsub("\\.\\d+", "", gene_sym)
+head(gene_symbols_cleaned)
+
+#create list for G:Profiler
+for (item in gene_symbols_cleaned) {
+  cat(item, "\n")
+}
+```
+
+After this, I conducted my analysis in G:Profiler [@gprofiler-generator-no-date]. I followed the settings from the tutorial to ensure that only the BP and REAC pathways are used [@tour-of-cytoscape-no-date]. Below is how my data looks [@image-upload-no-date]. 
+
+![gProfiler_initial](~/projects/a3_extras/gProfiler_initial.png)
+
+I then downloaded my GEM file from the G:Profiler site to load into Cytoscape; I also downloaded the combined names file in GMT for the pathways analysis [@tour-of-cytoscape-no-date]. After this, I loaded my file into Cytoscape's EnrichmentMaap app by loading my GEM file into the 'enrichments' space, and loaded the GMT combined pathways file into the 'GMT' space; all generic thresholds were set, 'filter genes by expression' was also ticked to ensure only relevant pathways were assessed, and 'sparse' connectivity was selected to used to display an accurate map [@cytoscape-ono-no-date; @enrichmentmap-no-date; @tour-of-cytoscape-no-date]. Below is how my inital enrichment map looks like.
+
+![first_enrichmentmap](~/projects/a3_extras/first_enrichmentmap.png)
+
+I then exported the associated table with this image, and have it below as a data frame. 
+
+```{r}
+#use import code from RStudio (when clicking import on a csv file) and turn table into data frame
+library(readr)
+first_enrichment_table <- read_csv("~/projects/a3_extras/first_enrichment_table.csv")
+first_enrichment_table <- as.data.frame(first_enrichment_table)
+head(first_enrichment_table)
+```
+
+Once this was done, I annotated my network by using the AutoAnnotate app on Cytoscape [@autoannotate-no-date]. I clicked 'New Annotation' and then 'Create Annotation' with the basic parameters set [@tour-of-cytoscape-no-date]. Below is what my network looks like after annotation. 
+
+![annotated_enrichmentmap](~/projects/a3_extras/annotated_enrichmentmap.png)
+
+I exported this table as well, as it added the cluster column at the end. The table is below. 
+
+```{r}
+#use import code from RStudio (when clicking import on a csv file) and turn table into data frame
+library(readr)
+annotated_enrichment_table <- read_csv("~/projects/a3_extras/annotated_enrichment_table.csv")
+annotated_enrichment_table <- as.data.frame(annotated_enrichment_table)
+head(annotated_enrichment_table)
+```
+
+I then went back to the EnrichmentMap app interface within Cytoscape and clicked 'Publication-Ready' and 'Show Chart Labels'. Below is the publication ready figure along with the legend generated from Cytoscape [@cytoscape-ono-no-date]. 
+
+![public_enrichmentmap](~/projects/a3_extras/public_enrichmentmap.png)
+![public_enrichmentmap_legend](~/projects/a3_extras/public_enrichmentmap_legend.png)
+
+I then collapsed my network by first ensuring to enable attribute aggregation, and then clicking 'collapse all' [@tour-of-cytoscape-no-date]. This is what the collapsed figure looks like. 
+
+![collapsed_enrichmentmap](~/projects/a3_extras/collapsed_enrichmentmap.png) 
+
+I also exported the table associated with this collpased network, and printed the entire table below as the rows changed from around 500 in the original table to 168 in this table. The table is below. 
+
+```{r}
+#use import code from RStudio (when clicking import on a csv file) and turn table into data frame
+library(readr)
+collapsed_enrichment_table <- read_csv("~/projects/a3_extras/collapsed_enrichment_table.csv")
+collapsed_enrichment_table <- as.data.frame(collapsed_enrichment_table)
+print(collapsed_enrichment_table)
+```
+
+### Questions Part 2
+**4. Create an enrichment map - how many nodes and how many edges in the resulting map? What thresholds were used to create this map?** 
+
+A: There are 575 nodes and 2513 edges in the first resulting enrichment map. The thresholds used were the basic thresholds, with the cut off values:
+  P-value: 1.0
+  FDR Q-value: 0.01
+  Jaccard: 0.35
+  Test used: Jaccard Index 
+Positive phenotype was UP with negative phenotype being DOWN. The data set edges was set to automatic and connectiveity was sparse (because dense lead to too many nodes/sets). 
+
+**5. Annotate your network - what parameters did you use to annotate the network?**
+
+A: The parameters used to annotate the network are as follows:
+  ![annotation_parameters](~/projects/a3_extras/annotation_parameters.png)
+
+**6. What are the major themes present in this analysis? Do they fit with the model? Are there any novel pathways or themes?**
+
+A: The major themes present in the collapsed network analysis are "biosynthetic metabolic process", "phosphorylation protein phosphorus", "regulation metabolic negative" and "intracellular signal transduction". I did not personally notice any novel pathways that are not common/previously substantially researched. 
+
+## Detailed View of Results
+**Prompt: Add a post analysis to your main network using specific transcription factors, microRNAs or drugs. Include the reason why you chose the specific miRs, TFs or drugs (i.e publications indicating that they might be related to your model). What does this post analysis show?**
+
+I started this part of this assignment by watching the lecture on conducting a post analysis [@isserlin-post-analysis-2024]. I decided to use the Bader Lab Human gene sets, specifically conducting an exploratory analysis using microRNAs (from the symbol folder). There were 2598 genes loaded, will 2544 passing cutoff and selected for import, and the cut off being 5. The test used was an overlap test (where the overlap has at least X genes), as it made the most sense with wanting to see the overall overlaps between the original and significant gene set (also, Mann Whitney was not an option with the data in Cytoscape, and the hypergeometric test yielded no edges despite passing). 
+
+I was not able to obtain a proper view of my signature dataset with my original dataset, as I kept receiving the error: "No edges were found within the cut off"; depsite changing the cut off, this persisted. However, below is the table associated with the signature gene set/post analysis.
+
+```{r}
+#use import code from RStudio (when clicking import on a csv file) and turn table into data frame
+library(readr)
+signature <- read_csv("~/projects/a3_extras/signature.csv")
+signature <- as.data.frame(signature)
+head(signature)
+```
+
+## Interpretation
+**1. Do the enrichment results support conclusions or mechanism discussed in the original paper? How do these results differ from the results you got from A2 thresholded methods?**
+
+A: In the original paper, they used data from the STRING database, which is a database of known and predicted interactions between proteins [@-2023; @string-database-no-date]. The network map looks different to the network analysis in the assignment, whereby they specifically delved into the network analysis of proteins interacting with the AIPL1 gene (which is the main gene in the study) [@-2023]. This differs from A2 as with A2 it was simple to compare between the threshold methods and particularly the differential methods such as the heatmap, since the analysis was the same. As the analysis is looking at different things with the network, it is difficult to assess the accuracy, and if major theme align since this assignment is conducting a theme analysis however the original paper conducted a protein interaction analysis. 
+
+**2. Can you find evidence, i.e. publications, to support some of the results that you see? How does this evidence support your result?**
+
+A: Through conducting an online database search through the University of Toronto library, I found articles that support my findings when searching for the main themes/pathways in my analysis. An example is the paper by Pang et al. 2022, where protein phosphorylation was discussed with regards to cell signaling, intervention therapy and disease [@pang-2022]. Cases like this and other studies support my results as my results also focus on these pathways, and their interaction with cell signaling. 
+
+## References
+@misc{clusterprofiler-no-date,
+	author = {clusterProfiler},
+	title = {{ClusterProfiler}},
+	url = {https://bioconductor.org/packages/release/bioc/html/clusterProfiler.html},
+}
+@misc{tour-of-cytoscape-no-date,
+	author = {Tour of Cytoscape},
+	title = {{Tour of Cytoscape}},
+	url = {https://cytoscape.org/cytoscape-tutorials/protocols/enrichmentmap-pipeline/#/13/27},
+}
+@misc{gprofiler-generator-no-date,
+	author = {gprofiler generator},
+	title = {{g:Profiler – a web server for functional enrichment analysis and conversions of gene lists}},
+	url = {https://biit.cs.ut.ee/gprofiler/gost},
+}
+@misc{biostars1-no-date,
+	author = {biostars1},
+	title = {{fgsea after deseq2, criteria for ranking DEGs.}},
+	url = {https://www.biostars.org/p/9526168/},
+}
+@misc{biostars2-no-date,
+	author = {biostars2},
+	title = {{GSEA following DESeq2}},
+	url = {https://www.biostars.org/p/266073/},
+}
+@misc{biostars3-no-date,
+	author = {biostars3},
+	title = {{GSEA PreRanked lists from DESeq2 results table}},
+	url = {https://www.biostars.org/p/420955/},
+}
+@misc{sanbomics-gsego-tutorial-2022,
+	author = {Sanbomics and Sanbomics gseGO Tutorial},
+	month = {8},
+	title = {{3 minute GSEA tutorial in R | RNAseq tutorials}},
+	year = {2022},
+	url = {https://www.youtube.com/watch?v=Mi6u4r0lJvo},
+}
+@misc{remove-after-decimals-no-date,
+	author = {remove after decimals},
+	title = {{how to remove decimals in rownames matrix?}},
+	url = {https://stackoverflow.com/questions/46956031/how-to-remove-decimals-in-rownames-matrix},
+}
+@misc{remove-duplicates-no-date,
+	author = {remove duplicates},
+	title = {{Remove duplicated rows}},
+	url = {https://stackoverflow.com/questions/13967063/remove-duplicated-rows},
+}
+@misc{turner-2018,
+	author = {Turner, Stephen},
+	month = {7},
+	title = {{DESeq results to pathways in 60 Seconds with the fgsea package}},
+	year = {2018},
+	url = {https://stephenturner.github.io/deseq-to-fgsea/},
+}
+@misc{annotationdbi-no-date,
+	author = {annotationdbi},
+	title = {{AnnotationDBI}},
+	url = {https://bioconductor.org/packages/release/bioc/html/AnnotationDbi.html},
+}
+@misc{the-difference-in-pathway-analysis-result-2023,
+	author = {The difference in pathway analysis result},
+	title = {{The difference in pathway analysis result}},
+	year = {2023},
+	url = {https://www.reddit.com/r/bioinformatics/comments/176o162/the_difference_in_pathway_analysis_result/},
+}
+@misc{rue-albrecht-no-date,
+	author = {Rue-Albrecht, Kevin and Cassol, Daniela and Rainer, Johannes and Shepherd, Lori},
+	title = {{Chapter 1 Bioconductor Package Submissions | Bioconductor Packages: development, maintenance, and peer review}},
+	url = {https://contributions.bioconductor.org/bioconductor-package-submissions.html#annPackage},
+}
+@misc{cytoscape-ono-no-date,
+	author = {Cytoscape Ono, Keiichiro},
+	title = {{Cytoscape: an open source platform for complex network analysis and visualization}},
+	url = {https://cytoscape.org/},
+}
+@misc{zach-2022,
+	author = {Zach},
+	month = {3},
+	title = {{How to Use the cat() Function in R to Concatenate Objects}},
+	year = {2022},
+	url = {https://www.statology.org/r-cat-function/},
+}
+@misc{orghsegdb-no-date,
+	author = {Org.Hs.eg.db},
+	title = {{Org.Hs.eg.db}},
+	url = {https://bioconductor.org/packages/release/data/annotation/html/org.Hs.eg.db.html},
+}
+@misc{image-upload-no-date,
+	author = {image upload},
+	title = {{How to upload an image into RStudio Notebook?}},
+	url = {https://stackoverflow.com/questions/34345712/how-to-upload-an-image-into-rstudio-notebook},
+}
+@misc{enrichmentmap-no-date,
+	author = {enrichmentmap},
+	title = {{EnrichmentMap Cytoscape App 3.3.5 — EnrichmentMap 3.3.5 documentation}},
+	url = {https://enrichmentmap.readthedocs.io/en/latest/},
+}
+@misc{autoannotate-no-date,
+	author = {AutoAnnotate},
+	title = {{AutoAnnotate Cytoscape App 1.4 — AutoAnnotate 1.4 documentation}},
+	url = {https://autoannotate.readthedocs.io/en/latest/},
+}
+@misc{string-database-no-date,
+	author = {STRING Database},
+	title = {{About - STRING functional protein association networks}},
+	url = {https://string-db.org/cgi/about?sessionId=bFshpCA5ffMq&footer_active_subpage=content},
+}
+@misc{isserlin-post-analysis-2024,
+	author = {Isserlin Post Analysis, Ruth},
+	title = {{lecture12_post_analysis_part1.mp4}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/29570013?module_item_id=5326908},
+}
+@article{pang-2022,
+	author = {Pang, Kun and Wang, Wei and Qin, Jiaxin and Shi, Zengliang and Lin, Hao and Ma, Yuyang and Xu, Hao and Wu, Zhuo‐Xun and Pan, Deng and Chen, Zhe‐Sheng and Han, Cong‐Hui},
+	journal = {MedComm (2020)},
+	month = {11},
+	number = {4},
+	title = {{Role of protein phosphorylation in cell signaling, disease, and the intervention therapy}},
+	volume = {3},
+	year = {2022},
+	doi = {10.1002/mco2.175},
+	url = {https://doi.org/10.1002/mco2.175},
+}
+@article{abbasaghababazadeh-2018,
+	author = {Abbas‐Aghababazadeh, Farnoosh and Li, Qian and Fridley, Brooke L.},
+	journal = {PloS one},
+	month = {10},
+	number = {10},
+	pages = {e0206312},
+	title = {{Comparison of normalization approaches for gene expression studies completed with high-throughput sequencing}},
+	volume = {13},
+	year = {2018},
+	doi = {10.1371/journal.pone.0206312},
+	url = {https://doi.org/10.1371/journal.pone.0206312},
+}
+@misc{deseq2-no-date,
+	author = {DESeq2},
+	title = {{DESEQ2}},
+	url = {https://bioconductor.org/packages/release/bioc/html/DESeq2.html},
+}
+@misc{ctb-2021,
+	author = {Ctb, Michael Love [aut Cre], Constantin Ahlmann-Eltze [ctb], Kwame Forbes [ctb], Simon Anders [aut, Ctb], Wolfgang Huber [aut,},
+	month = {2},
+	title = {{MA-plot from base means and log fold changes}},
+	year = {2021},
+	url = {https://rdrr.io/bioc/DESeq2/man/plotMA.html},
+}
+@article{maza-2016,
+	author = {Maza, Élie},
+	journal = {Frontiers in Genetics},
+	month = {9},
+	title = {{In Papyro comparison of TMM (EDGER), RLE (DESEQ2), and MRN normalization methods for a simple Two-Conditions-Without-Replicates RNA-SEQ experimental design}},
+	volume = {7},
+	year = {2016},
+	doi = {10.3389/fgene.2016.00164},
+	url = {https://doi.org/10.3389/fgene.2016.00164},
+}
+@misc{blog-2016,
+	author = {Blog, Rna-Seq and Blog, Rna-Seq},
+	month = {10},
+	title = {{Comparison of TMM (EDGER), RLE (DESEQ2), and MRN normalization methods | RNA-Seq blog}},
+	year = {2016},
+	url = {https://www.rna-seqblog.com/comparison-of-tmm-edger-rle-deseq2-and-mrn-normalization-methods/},
+}
+@misc{edger-no-date,
+	author = {edgeR},
+	title = {{EdgeR}},
+	url = {https://bioconductor.org/packages/edgeR/},
+}
+@misc{love-2024,
+	author = {Love, Michael I. and Anders, Simon and Huber, Wolfgang},
+	title = {{Analyzing RNA-seq data with DESeq2}},
+	year = {2024},
+	url = {https://www.bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html},
+}
+@misc{unknown-author-no-dateA,
+	title = {{Design model for DESeq2 analysis}},
+	url = {https://support.bioconductor.org/p/102684/},
+}
+@misc{unknown-author-no-dateB,
+	title = {{Error:The design matrix has the same number of samples and coefficients to fit,   so estimation of dispersion is not possible. Treating samples   as replicates was deprecated in v1.20 and no longer su}},
+	url = {https://support.bioconductor.org/p/134505/},
+}
+@misc{comprehensive-r-archive-network-cran-no-date,
+	author = {Comprehensive R Archive Network (CRAN)},
+	title = {{CRAN - Package gprofiler2}},
+	url = {https://cran.r-project.org/web/packages/gprofiler2/index.html},
+}
+@misc{geoquery-no-date,
+	author = {GEOQuery},
+	title = {{GEOQuery}},
+	url = {https://www.bioconductor.org/packages/release/bioc/html/GEOquery.html},
+}
+@misc{bonnin-2020,
+	author = {Bonnin, Sarah},
+	month = {3},
+	title = {{19.11 Volcano plots | Introduction to R}},
+	year = {2020},
+	url = {https://biocorecrg.github.io/CRG_RIntroduction/volcano-plots.html},
+}
+@misc{limma-no-date,
+	author = {limma},
+	title = {{limma}},
+	url = {https://bioconductor.org/packages/release/bioc/html/limma.html},
+}
+@misc{unknown-author-no-dateC,
+	title = {{Visual R Markdown - citations}},
+	url = {https://rstudio.github.io/visual-markdown-editing/citations.html#:~:text=You%20insert%20citations%20by%20either,and%20are%20separated%20by%20semicolons.},
+}
+@misc{unknown-author-no-dateD,
+	title = {{R Markdown Syntax: Headings & Lists – Authoring scientific publications with R Markdown}},
+	url = {https://ucsbcarpentry.github.io/R-markdown/03-headings-lists/index.html},
+}
+@misc{unknown-author-no-dateE,
+	title = {{How to add table of contents in Rmarkdown?}},
+	url = {https://stackoverflow.com/questions/23957278/how-to-add-table-of-contents-in-rmarkdown},
+}
+@misc{bhalla-no-dateA,
+	author = {Bhalla, Deepanshu},
+	title = {{How to Extract Numeric Variables from Dataframe in R}},
+	url = {https://www.listendata.com/2023/08/extract-numeric-columns-in-r.html},
+}
+@misc{bhalla-no-dateB,
+	author = {Bhalla, Deepanshu},
+	title = {{7 Ways to Remove Rows with NA in R}},
+	url = {https://www.listendata.com/2023/07/7-ways-to-remove-rows-with-na-in-r.html},
+}
+@article{-2023,
+	author = {Галиева, А. Т. and Egorov, Alexander and Malogolovkin, Alexander and Brovin, Andrew and Karabelsky, Alexander},
+	journal = {International journal of molecular sciences (Online)},
+	month = {12},
+	number = {1},
+	pages = {197},
+	title = {{RNA-Seq analysis of Trans-Differentiated ARPE-19 cells transduced by AAV9-AIPL1 vectors}},
+	volume = {25},
+	year = {2023},
+	doi = {10.3390/ijms25010197},
+	url = {https://doi.org/10.3390/ijms25010197},
+}
+@misc{isserlin-2024A,
+	author = {Isserlin, Ruth},
+	title = {{lecture4_get_the_data.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30146641?module_item_id=5505849},
+}
+@misc{isserlin-2024B,
+	author = {Isserlin, Ruth},
+	title = {{lecture8_prelim_ORA.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30766485?module_item_id=5573089},
+}
+@misc{isserlin-2024C,
+	author = {Isserlin, Ruth},
+	title = {{lecture5_normalizing_our_dataset.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30263688?module_item_id=5518469},
+}
+@misc{isserlin-2024D,
+	author = {Isserlin, Ruth},
+	title = {{lecture5_normalization.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30249274?module_item_id=5517248},
+}
+@misc{isserlin-2024E,
+	author = {Isserlin, Ruth},
+	title = {{lecture7_differential_expression_with_edger.pdf}},
+	year = {2024},
+	url = {https://q.utoronto.ca/courses/336715/files/30640370?module_item_id=5559011},
+}
+@misc{ggrepel-no-date,
+	author = {ggrepel},
+	title = {{ggrepel}},
+	url = {https://cran.r-project.org/web/packages/ggrepel/readme/README.htm},
+}
