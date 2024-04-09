@@ -1,0 +1,294 @@
+---
+title: "BCB420 A1"
+name: Ishmal Amir
+assignment: 1 
+bibliography: references_a1.bib
+link-citations: true
+output:
+  html_document:
+    toc: true
+    toc depth: 2
+    theme: united
+---
+
+```{r}
+geoid <- "GSE252276"
+gdata <- getGEO(geoid, GSEMatrix = FALSE)
+
+gdata@header$summary
+```
+
+```{r}
+library(GEOquery)
+gsupp <- getGEOSuppFiles(geoid, fetch_files = FALSE)
+gfilename <- gsupp$fname[2]
+gfile = getGEOSuppFiles(geoid, baseDir = download_dir, fetch_files = TRUE)
+```
+
+```{r}
+geodata <- read.table(file.path(download_dir, geoid, gfilename), header=TRUE, check.names=TRUE, fill = TRUE)
+dim(geodata)
+```
+
+```{r}
+library(knitr)
+kable(geodata[1:30,1:14], format = "html")
+
+library(magrittr)
+library(kableExtra)
+
+gtable <- kable(geodata[1:30, 1:14], format = "html") %>%
+  kable_styling(position = "center", bootstrap_options = c("bordered", "responsive"))
+
+print(gtable)
+```
+
+```{r}
+colnames(geodata) [1:14]
+```
+
+```{r}
+list_samples <- gdata@gsms
+info_data <- do.call(rbind, lapply(list_samples, FUN=function(x){c(x@header$title, x@header$charactertistics_ch1)}))
+print(info_data)
+```
+
+```{r}
+gdata@gsms[[1]]@header$characteristics_ch1
+gdata@gsms[[2]]@header$characteristics_ch1
+gdata@gsms[[3]]@header$characteristics_ch1
+gdata@gsms[[4]]@header$characteristics_ch1
+gdata@gsms[[5]]@header$characteristics_ch1
+gdata@gsms[[6]]@header$characteristics_ch1
+gdata@gsms[[7]]@header$characteristics_ch1
+gdata@gsms[[8]]@header$characteristics_ch1
+gdata@gsms[[9]]@header$characteristics_ch1
+gdata@gsms[[10]]@header$characteristics_ch1
+gdata@gsms[[11]]@header$characteristics_ch1
+gdata@gsms[[12]]@header$characteristics_ch1
+```
+
+```{r}
+gdf <- data.frame(
+  GSM = c("GSM7998492", "GSM7998493", "GSM7998494", "GSM7998495", "GSM7998496", "GSM7998497", "GSM7998498", "GSM7998499", "GSM7998500", "GSM7998501", "GSM7998502", "GSM7998503"),
+  CellLine = c("ARPE-19", "ARPE-19", "ARPE-19", "ARPE-19", "ARPE-19", "ARPE-19", "ARPE-19", "ARPE-19", "ARPE-19", "ARPE-19", "ARPE-19", "ARPE-19"), 
+  Treatment = c("AAV9-AIPL1wt", "AAV9-AIPL1wt", "AAV9-AIPL1co", "AAV9-AIPL1co", "non-transduced control", "AAV9-GFP", "AAV9-GFP", "AAV9-AIPL1wt", "AAV9-AIPL1co", "non-transduced control", "non-transduced control", "AAV9-GFP"), 
+  Rep = c("rep.1", "rep.3", "rep.2", "rep.3", "rep.1", "rep.1", "rep.3", "rep.2", "rep.1", "rep.2", "rep.3", "rep.2"))
+
+print(gdf)
+```
+
+```{r}
+print(geodata)
+```
+
+```{r}
+row_sums <- rowSums(geodata[, -c(1, 2)])
+geodata_filtered <- geodata[row_sums != 0, ]
+print(geodata_filtered)
+```
+
+```{r}
+row_min <- apply(geodata[, -c(1, 2)], 1, min, na.rm = TRUE)
+geodata_filtered_1 <- geodata[row_min >= 5, ]
+print(geodata_filtered_1)
+```
+
+```{r}
+geodata_numeric <- geodata[, sapply(geodata, is.numeric)]
+gplot_numeric <- log2(geodata_numeric)
+gplot <- cbind(geodata[, !sapply(geodata, is.numeric)], gplot_numeric)
+
+print(gplot)
+print(gplot_numeric)
+```
+
+```{r}
+plot.new()
+boxplot(gplot_numeric, xlab = "Samples", ylab = "Values", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "GRNASeqSamples")
+abline(h = median(apply(gplot_numeric, 2, median)), col = "green", lwd = 0.6, lty = "dashed")
+```
+
+```{r}
+geodata_numeric_no_na <- na.omit(geodata_numeric)
+counts_density1 <- apply(log2(geodata_numeric_no_na), 2, density)
+
+#calculate the limits across all the samples
+xlim <- 0; ylim <- 0
+for (i in 1: length (counts_density1)) {
+  xlim <- range(c(xlim, counts_density1 [[i]]$x));
+  ylim <- range(c(ylim, counts_density1[[i]]$y))
+}
+
+cols <- rainbow(length(counts_density1)) 
+ltys <- rep(1, length(counts_density1))
+
+#plot the first density plat to initialize the plot 
+plot (counts_density1[[1]], xlim=xlim, ylim-ylim, type="n",
+ylab = "Smoothing density of Log2-CPM",
+main="", cex.lab = 0.85)
+
+#plot each line
+for (i in 1: length (counts_density1))
+  lines (counts_density1[[i]], col=cols [i], lty=ltys[i])
+
+#create legend 
+legend ("topright", colnames(gplot_numeric),
+        col=cols, lty=ltys, cex=0.75,
+        border="blue", text.col = "green4",
+        merge = TRUE, bg = "gray90")
+```
+
+```{r}
+row_sums1 <- rowSums(geodata_numeric_no_na[, -c(1, 2)])
+geodata_numeric_no_na_0 <- geodata_numeric_no_na[row_sums != 0, ]
+
+row_min1 <- apply(geodata_numeric_no_na[, -c(1, 2)], 1, min, na.rm = TRUE)
+geodata_numeric_no_na_1 <- geodata_numeric_no_na[row_min >= 5, ]
+
+g_n_nona_comb <- rbind(geodata_numeric_no_na_0, geodata_numeric_no_na_1)
+
+filtered_g_n_nona_comb <- na.omit(g_n_nona_comb)
+
+print(filtered_g_n_nona_comb)
+```
+
+```{r}
+
+counts_density2 <- apply(log2(filtered_g_n_nona_comb), 2, density)
+
+#calculate the limits across all the samples
+xlim <- 0; ylim <- 0
+for (i in 1: length (counts_density2)) {
+  xlim <- range(c(xlim, counts_density2 [[i]]$x));
+  ylim <- range(c(ylim, counts_density2[[i]]$y))
+}
+
+cols <- rainbow(length(counts_density2)) 
+ltys <- rep(1, length(counts_density2))
+
+#plot the first density plat to initialize the plot 
+
+plot (counts_density2[[1]], xlim=xlim, ylim-ylim, type="n",
+ylab = "Smoothing density of Log2-CPM",
+main="", cex.lab = 0.85)
+
+#plot each line
+for (i in 1: length (counts_density2))
+  lines (counts_density2[[i]], col=cols [i], lty=ltys[i])
+
+#create legend 
+legend ("topright", colnames(gplot_numeric),
+        col=cols, lty=ltys, cex=0.75,
+        border="blue", text.col = "green4",
+        merge = TRUE, bg = "gray90")
+```
+
+```{r}
+library(edgeR)
+
+matrixg <- as.matrix(filtered_g_n_nona_comb)
+
+d = DGEList(counts = matrixg, group = colnames)
+d = calcNormFactors(d)
+
+norm_edgeR <- cpm(d)
+print(norm_edgeR)
+```
+
+```{r}
+plot(norm_edgeR, main = "Normalized Counts", xlab = "Sample", ylab = "Counts per Million (CPM)")
+```
+
+```{r}
+plot.new()
+boxplot(geodata_numeric, xlab = "Samples", ylab = "Values", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "GRNASeqSamples", ylim = ylim)
+abline(h = median(apply(gplot_numeric, 2, median)), col = "green", lwd = 0.6, lty = "dashed")  
+
+plot.new()
+boxplot(filtered_g_n_nona_comb, xlab = "Samples", ylab = "Values", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "GRNASeqSamples", ylim = ylim)
+abline(h = median(apply(gplot_numeric, 2, median)), col = "green", lwd = 0.6, lty = "dashed")  
+
+plot.new()
+boxplot(results_df, xlab = "Samples", ylab = "Values", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "Normalized", ylim = ylim)
+abline(h = median(apply(gplot_numeric, 2, median)), col = "green", lwd = 0.6, lty = "dashed")   
+
+norm_edgeR_df <- as.data.frame(norm_edgeR)
+plot.new()
+boxplot(norm_edgeR_df, xlab = "Samples", ylab = "Values", las = 2, cex = 0.5, cex.lab = 0.5, cex.axis = 0.5, main = "Normalized", ylim = ylim)
+abline(h = median(apply(gplot_numeric, 2, median)), col = "green", lwd = 0.6, lty = "dashed")  
+        
+```
+
+```{r}
+limma::plotMDS(d, labels = NULL, pch = 1, col = c("darkgreen", "blue", "orange", "darkblue", "pink", "red", "purple", "grey", "black", "brown", "green", "lightblue") [factor(colnames)])
+
+legend("bottomright", legend=levels(factor(colnames)), pch=c(1), col= c("darkgreen", "blue", "orange", "darkblue", "pink", "red", "purple", "grey", "black", "brown", "green", "lightblue"), title="Class", bty = 'n', cex = 0.5)
+```
+
+```{r}
+geodata_names <- rbind(geodata_filtered, geodata_filtered_1)
+omit_geodata_names <- na.omit(geodata_names)
+
+gene_names <- omit_geodata_names$geneID
+dif_row_names <- make.unique(gene_names, sep = "_")
+rownames(filtered_g_n_nona_comb) <- dif_row_names
+
+print(filtered_g_n_nona_comb)
+```
+
+```{r}
+# Create a sample names vector
+sample_names <- colnames(filtered_g_n_nona_comb)
+
+# Create a dummy colData DataFrame
+colData <- data.frame(sampleName = sample_names)
+
+# Ensure the sampleName column is a row name
+rownames(colData) <- sample_names
+```
+
+```{r}
+# Load the DESeq2 library
+library(DESeq2)
+
+# Create a DESeqDataSet object
+gdds <- DESeqDataSetFromMatrix(countData = filtered_g_n_nona_comb, colData = colData, design = ~ 1) 
+
+gdds <- DESeq(gdds)
+
+results <- results(gdds)
+
+print(results)
+
+results_df <- as.data.frame(results)
+
+print(results_df)
+
+```
+
+```{r}
+results_df <- as.data.frame(results)
+logfc <- results_df$log2FoldChange
+density_estimate <- density(logfc)
+
+plot(density_estimate, type = "n",
+     ylab = "Smoothing density of Log2-CPM",
+     main = "", cex.lab = 0.85)
+
+lines(density_estimate, col = "blue")
+```
+
+```{r}
+library(ggplot2)
+
+ggplot(results, aes(x = baseMean, y = log2FoldChange)) +
+  geom_point() +
+  labs(x = "Mean of normalized counts (baseMean)", y = "log2 Fold Change") +
+  ggtitle("MA-plot of Differential Expression")
+```
+
+```{r}
+plotDispEsts(gdds)
+
+```
