@@ -1,0 +1,38 @@
+---
+title: "GSEA Homework"
+output: html_notebook
+author: Ishmal Amir
+---
+
+```{r}
+#install and load GSA to fetch GMT file from Bader Lab 
+install.packages("GSA")
+library(GSA)
+
+#set directory
+data_dir <- "~/"
+
+#load GMT file
+gmt_file <- GSA.read.gmt(paste(data_dir, "Human_GOBP_AllPathways_no_GO_iea_March_01_2021_symbol.gmt", sep = "/"))
+
+#load ranks file 
+ranks <- read.table("~/MesenvsImmuno_RNASeq_ranks.rnk",
+                    header=TRUE, colClasses = c("character", "numeric"))
+ranks <- setNames(ranks$rank, ranks$GeneName)
+str(ranks)
+
+#install and load fgsea to run GSEA analysis
+BiocManager::install("fgsea")
+library(fgsea)
+
+#run fgsea
+fgseaRes <- fgsea(pathways = gmt_file, 
+                  stats    = ranks,
+                  minSize  = 15,
+                  maxSize  = 200,
+                  nperm = 1000)
+
+print(fgseaRes)
+
+```
+
